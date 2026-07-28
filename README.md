@@ -207,3 +207,27 @@ Each scraper keeps its selectors in one small block:
 - Add integration tests that feed saved HTML fixtures into each scraper (so you
   can test parsing without hitting the live sites).
 ```
+
+
+
+Nə etməlidir (3 addım):
+
+JDK 21 yükləsin (Temurin)
+Postgres — bir dəfə bu əmr, vəssalam:
+docker run --name pricecompare-db -e POSTGRES_DB=pricecompare -e POSTGRES_PASSWORD=postgres -p 5432:5432 -d postgres:16
+İşə salsın:
+./mvnw spring-boot:run
+Cədvəlləri backend özü yaradır, SQL yazmağa ehtiyac yoxdur. Maven də layihənin içindədir.
+
+Nə bilməlidir:
+
+Cəmi bir endpoint var: GET localhost:8080/api/search?q=iphone 16
+CORS artıq açıqdır localhost:3000 və 5173 üçün — başqa portda işləyirsə sən mənə de, əlavə edim
+İlk axtarış 4-8 saniyə çəkir (3 sayta gedir) → loading mütləqdir. Sonra 30 dəqiqə keşdən ani gəlir
+Dəqiqədə 20 sorğu limiti var, 429 qaytarır → axtarış inputuna debounce qoysun
+Əsas hissə results[].stores[] — hər mağaza üçün bir sətir, artıq ucuzdan bahaya sıralanıb
+colorsMissing — layihənin əsas fikri. "Kontakt-da qara yoxdur, İrşad-da var" məhz bu sahədən çıxır
+storeErrors boş deyilsə göstərsin — bəzən mağaza cavab vermir, gizlətmək düzgün deyil
+Sənədin içində cavabın tam JSON strukturu sahə-sahə izahla və hazır fetch nümunəsi də var.
+
+
