@@ -13,37 +13,66 @@ import java.util.regex.Pattern;
  * Turns a store's messy product title into normalized attributes we can match on.
  *
  * Stores title the same phone differently, e.g.:
- *   "Apple iPhone 16 Pro Max 256GB Natural Titanium"
- *   "iPhone 16 Pro Max (256 GB) - Titanium"
- *   "Smartfon Apple iPhone 16 Pro Max 256Gb Qara"
+ *   "iPhone 16 Pro Max 256 GB Black Titanium"      (Kontakt)
+ *   "iPhone 16 Pro Max 256 GB Black"               (Irshad)
+ *   "iPhone 16 128GB BLACK"                        (Soliton)
  *
- * We extract brand, a cleaned model, storage and RAM so the matcher can decide
- * these are the same product.
+ * We extract brand, colour, storage and RAM, and reduce what's left to a model
+ * signature the matcher can compare.
  */
 @Component
 public class ProductNormalizer {
 
-    // Common brands seen in these stores. Order matters: longer/multiword first.
+    /**
+     * Brands we recognise. Matched on word boundaries — an earlier version used
+     * {@code contains()}, which made short entries like "hp" and "lg" fire inside
+     * unrelated words.
+     */
     private static final List<String> BRANDS = List.of(
-            "samsung", "apple", "iphone", "xiaomi", "redmi", "poco", "huawei",
-            "honor", "realme", "oppo", "vivo", "nokia", "asus", "lenovo",
-            "hp", "dell", "acer", "msi", "lg", "sony", "google", "oneplus",
-            "tecno", "infinix"
+            "samsung", "apple", "iphone", "ipad", "macbook", "xiaomi", "redmi",
+            "poco", "huawei", "honor", "realme", "oppo", "vivo", "nokia", "asus",
+            "lenovo", "hp", "dell", "acer", "msi", "lg", "sony", "google",
+            "oneplus", "tecno", "infinix", "philips", "bosch", "beko", "canon",
+            "nikon", "jbl", "anker", "logitech"
     );
 
+    /** Brand aliases that should display as their parent brand. */
+    private static final List<String> APPLE_FAMILY = List.of("iphone", "ipad", "macbook");
+
+    // The leading lookbehind matters: without it "128GB" also matches as "28GB",
+    // and 1TB/2TB drives need the single-digit case.
     private static final Pattern STORAGE = Pattern.compile(
-            "(\\d{2,4})\\s*(gb|tb)\\b", Pattern.CASE_INSENSITIVE);
+            "(?<![\\d.])(\\d{1,4})\\s*(gb|tb)(?![\\p{L}])", Pattern.CASE_INSENSITIVE);
 
-    // RAM is usually written like "8/256", "8GB RAM", "RAM 8 GB".
     private static final Pattern RAM = Pattern.compile(
-            "(?:ram\\s*)?(\\d{1,2})\\s*gb\\s*(?:ram)?", Pattern.CASE_INSENSITIVE);
-
-    private static final Pattern RAM_SLASH = Pattern.compile(
-            "\\b(\\d{1,2})\\s*/\\s*(\\d{2,4})\\b");
+            "(?:ram\\s*)?(?<!\\d)(\\d{1,2})\\s*gb\\s*(?:ram)?", Pattern.CASE_INSENSITIVE);
 
     /**
-     * Populate normalized fields on an offer's specs and return a normalized
-     * key object used by the matcher. Non-destructive to the raw title.
+     * RAM and storage written together, like "8/256" or "12/128GB".
+     *
+     * Two details are load-bearing. The trailing lookahead rather than {@code \b}
+     * is needed because {@code \b} fails on "12/128GB" — digit and "G" are both
+     * word characters. And the unit is part of the match so it is removed with
+     * the numbers: leaving an orphan "GB" behind let the storage pattern pair it
+     * with the "25" of "Galaxy S25" and quietly eat the model number.
+     */
+    private static final Pattern RAM_SLASH = Pattern.compile(
+            "(?<!\\d)(\\d{1,2})\\s*/\\s*(\\d{2,4})\\s*(gb|tb)?(?!\\d)",
+            Pattern.CASE_INSENSITIVE);
+
+    /**
+     * Manufacturer part numbers, e.g. "SM-S931B" on Samsung listings. Stores
+     * include them inconsistently — İrşad writes "Galaxy S25 SM-S931", Soliton
+     * just "Galaxy S25" — so leaving them in the signature splits one phone into
+     * three separate comparisons.
+     */
+    private static final Pattern MODEL_CODE = Pattern.compile(
+            "(?<![\\p{L}\\p{N}])sm[-\\s]?[a-z]?\\d{3,4}[a-z]?(?![\\p{L}\\p{N}])",
+            Pattern.CASE_INSENSITIVE);
+
+    /**
+     * Populate normalized fields on an offer's specs and return a normalized key
+     * object used by the matcher. The raw title is never modified.
      */
     public NormalizedProduct normalize(StoreOffer offer) {
         String raw = offer.getRawTitle() == null ? "" : offer.getRawTitle();
@@ -52,39 +81,42 @@ public class ProductNormalizer {
         String brand = detectBrand(lower);
         String storage = detectStorage(lower);
         String ram = detectRam(lower);
-
-        // Build a comparable "model signature": strip brand words, colors,
-        // marketing fluff and punctuation, keep the meaningful model tokens.
+        String color = ColorVocabulary.detect(lower);
         String signature = buildSignature(lower, brand);
 
-        // Fold detected specs back onto the offer so the response carries them.
+        // Fold detected attributes back onto the offer so the response carries them
+        // even when the store's own spec table was unavailable.
         ProductSpecs specs = offer.getSpecs() != null ? offer.getSpecs()
                 : ProductSpecs.builder().build();
         if (specs.getStorage() == null && storage != null) specs.setStorage(storage);
         if (specs.getRam() == null && ram != null) specs.setRam(ram);
         offer.setSpecs(specs);
 
+        if (offer.getColor() == null) {
+            offer.setColor(color);
+        }
+
         return new NormalizedProduct(
-                brand,
-                signature,
-                storage,
-                ram,
-                buildCanonicalName(brand, signature, storage)
-        );
+                brand, signature, storage, ram, color,
+                buildCanonicalName(brand, signature, storage));
     }
 
     private String detectBrand(String lower) {
         for (String b : BRANDS) {
-            if (lower.contains(b)) {
-                // Normalize the "iphone" alias to the Apple brand for display.
-                return b.equals("iphone") ? "apple" : b;
+            if (wordPresent(lower, b)) {
+                return APPLE_FAMILY.contains(b) ? "apple" : b;
             }
         }
         return "unknown";
     }
 
+    private static boolean wordPresent(String haystack, String word) {
+        return Pattern.compile("(?<![\\p{L}\\p{N}])" + Pattern.quote(word) + "(?![\\p{L}\\p{N}])")
+                .matcher(haystack).find();
+    }
+
     private String detectStorage(String lower) {
-        // Prefer an explicit "x/yGB" pattern's second number as storage.
+        // "8/256" is unambiguous: the second number is storage.
         Matcher slash = RAM_SLASH.matcher(lower);
         if (slash.find()) {
             return slash.group(2) + "GB";
@@ -93,7 +125,7 @@ public class ProductNormalizer {
         while (m.find()) {
             int val = Integer.parseInt(m.group(1));
             String unit = m.group(2).toUpperCase(Locale.ROOT);
-            // Storage is typically >= 64GB; smaller GB numbers are usually RAM.
+            // Any TB figure is storage; in GB, anything under 64 is really RAM.
             if (unit.equals("TB") || val >= 64) {
                 return val + unit;
             }
@@ -118,34 +150,35 @@ public class ProductNormalizer {
     }
 
     /**
-     * Produce a compact model signature by removing brand, storage, colors and
-     * noise, then keeping alphanumeric model tokens. Two offers with the same
-     * signature (or a high token overlap) are considered the same product.
+     * Produce a compact model signature by removing brand, storage, colour and
+     * marketing noise, keeping only the tokens that identify the model.
      */
     private String buildSignature(String lower, String brand) {
         String s = lower;
-        s = s.replace("iphone", " iphone "); // keep model family token
-        // Remove obvious noise words (Azerbaijani + Russian + English).
-        for (String noise : NOISE_WORDS) {
-            s = s.replaceAll("\\b" + Pattern.quote(noise) + "\\b", " ");
-        }
-        // Remove colors.
-        for (String color : COLOR_WORDS) {
-            s = s.replaceAll("\\b" + Pattern.quote(color) + "\\b", " ");
-        }
-        // Remove storage/ram tokens (already captured separately).
-        s = STORAGE.matcher(s).replaceAll(" ");
+
+        // Storage and RAM come out first, while their units are still attached.
+        // Stripping noise words first would remove the "gb" from "256gb" and
+        // leave a bare "256" behind to pollute the signature.
         s = RAM_SLASH.matcher(s).replaceAll(" ");
-        // Drop the brand word itself except keep "iphone" family for phones.
-        if (!brand.equals("apple")) {
-            s = s.replaceAll("\\b" + Pattern.quote(brand) + "\\b", " ");
-        } else {
-            s = s.replaceAll("\\bapple\\b", " ");
+        s = STORAGE.matcher(s).replaceAll(" ");
+        s = MODEL_CODE.matcher(s).replaceAll(" ");
+
+        for (String noise : NOISE_WORDS) {
+            s = s.replaceAll("(?<![\\p{L}\\p{N}])" + Pattern.quote(noise) + "(?![\\p{L}\\p{N}])", " ");
         }
+        s = ColorVocabulary.strip(s);
+
+        // Drop the brand word, but keep Apple's product-family words ("iphone",
+        // "ipad") — they're the most discriminating token in the title.
+        if (!"unknown".equals(brand) && !"apple".equals(brand)) {
+            s = s.replaceAll("(?<![\\p{L}\\p{N}])" + Pattern.quote(brand) + "(?![\\p{L}\\p{N}])", " ");
+        } else if ("apple".equals(brand)) {
+            s = s.replaceAll("(?<![\\p{L}\\p{N}])apple(?![\\p{L}\\p{N}])", " ");
+        }
+
         // Keep letters, digits and spaces only.
-        s = s.replaceAll("[^a-z0-9 ]", " ");
-        s = s.replaceAll("\\s+", " ").trim();
-        return s;
+        s = s.replaceAll("[^\\p{L}\\p{N} ]", " ");
+        return s.replaceAll("\\s+", " ").trim();
     }
 
     private String buildCanonicalName(String brand, String signature, String storage) {
@@ -169,25 +202,16 @@ public class ProductNormalizer {
         StringBuilder out = new StringBuilder();
         for (String tok : s.split(" ")) {
             if (tok.isBlank()) continue;
-            // Keep model numbers/letters uppercase-ish where natural.
             out.append(capitalize(tok)).append(' ');
         }
         return out.toString().trim();
     }
 
-    // Words that carry no model meaning; extend as you see store-specific fluff.
+    /** Words that carry no model meaning; extend as you see store-specific fluff. */
     private static final List<String> NOISE_WORDS = List.of(
             "smartfon", "smartphone", "telefon", "mobil", "cep", "cib",
             "noutbuk", "notebook", "laptop", "kompüter", "computer", "planşet",
-            "tablet", "yeni", "new", "original", "originali", "rəngli"
-    );
-
-    // Colors in az/ru/en so they don't pollute the model signature.
-    private static final List<String> COLOR_WORDS = List.of(
-            "qara", "ağ", "boz", "gümüşü", "qızılı", "mavi", "yaşıl", "sarı",
-            "bənövşəyi", "çəhrayı", "black", "white", "gray", "grey", "silver",
-            "gold", "blue", "green", "yellow", "purple", "pink", "titanium",
-            "natural", "desert", "midnight", "starlight", "graphite",
-            "чёрный", "белый", "серый", "золотой", "синий", "зелёный"
+            "tablet", "yeni", "new", "original", "originali", "rəngli", "rəng",
+            "əd", "ədəd", "model", "gb", "tb"
     );
 }

@@ -8,11 +8,11 @@ import java.util.List;
 /**
  * Contract every store integration implements. One implementation per store.
  *
- * A scraper is responsible for:
- *   1. running the store's own search for the user's query,
- *   2. parsing the search-results page into a list of {@link StoreOffer}s,
- *   3. (optionally) enriching each offer with details from its product page
- *      (colors, images, specs, credit plans).
+ * Scraping happens in two phases because the stores' search results are thin:
+ * Kontakt's search API has no installment plans, Irshad's has no specs, and
+ * Soliton's has no price at all. Phase one gets candidates cheaply, the
+ * orchestrator filters them for relevance, and only the survivors cost us a
+ * detail-page fetch in phase two.
  *
  * Implementations must be resilient: a parse failure for one product should not
  * abort the whole store. Throwing from {@link #search} means the store is
@@ -26,11 +26,24 @@ public interface StoreScraper {
     /** Whether this store is enabled in config. */
     boolean isEnabled();
 
+    /** Whether detail-page enrichment is enabled for this store. */
+    boolean isEnrichEnabled();
+
     /**
-     * Search the store and return matched offers.
+     * Phase one: run the store's own search and return candidate offers.
      *
      * @param query the user's raw search text, e.g. "iphone 16 pro max"
      * @return offers found (possibly empty); never null
      */
     List<StoreOffer> search(String query);
+
+    /**
+     * Phase two: fetch the offer's product page and fold in whatever the search
+     * results couldn't give us — specs, installment plans, extra images, and for
+     * Soliton the price itself.
+     *
+     * Mutates and returns the same offer. Failures are swallowed and logged: an
+     * offer without specs is still worth showing, so enrichment is best-effort.
+     */
+    StoreOffer enrich(StoreOffer offer);
 }

@@ -16,7 +16,11 @@ import java.util.List;
 import java.util.Locale;
 
 /**
- * Top-level search use case: cache-first, then scrape + normalize + match.
+ * Top-level search use case: cache-first, then scrape + filter + match.
+ *
+ * The cache is not a nicety. A cold search costs three store searches plus up to
+ * eighteen product-page fetches; serving repeat queries from memory is what keeps
+ * the stores tolerant of us and the endpoint responsive.
  *
  * We manage the cache explicitly (rather than via {@code @Cacheable}) so we can
  * honestly report {@code fromCache} to the frontend — a plain {@code @Cacheable}
@@ -52,12 +56,14 @@ public class SearchService {
             SearchResponse cached = cache.get(normalized, SearchResponse.class);
             if (cached != null) {
                 log.info("Cache hit for '{}'", normalized);
-                return cached.toBuilder().fromCache(true).build();
+                return cached.toBuilder().fromCache(true).tookMs(0).build();
             }
         }
 
         // 2) Cache miss — scrape, match, store, return fresh.
         log.info("Cache miss — scraping stores for '{}'", normalized);
+        long startedAt = System.currentTimeMillis();
+
         ScrapingOrchestrator.ScrapeResult result = orchestrator.scrapeAll(originalQuery);
         List<ProductComparison> comparisons = matcher.groupOffers(result.offers());
 
@@ -68,13 +74,17 @@ public class SearchService {
                 .storeErrors(result.errors())
                 .fromCache(false)
                 .fetchedAt(Instant.now())
+                .tookMs(System.currentTimeMillis() - startedAt)
                 .build();
 
         // Only cache responses that actually produced results, so a transient
-        // total failure (all stores down) isn't cached for 30 minutes.
+        // total failure (all stores down) isn't cached for the full TTL.
         if (cache != null && !comparisons.isEmpty()) {
             cache.put(normalized, fresh);
         }
+
+        log.info("Search '{}' -> {} products from {} stores in {}ms",
+                originalQuery, comparisons.size(), result.succeeded().size(), fresh.getTookMs());
         return fresh;
     }
 

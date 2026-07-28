@@ -24,24 +24,66 @@ server:
   port: 8080
 
 # ---- Application-specific scraping config ----
+#
+# The search URLs below are the endpoints the stores' own front-ends call, not the
+# pages a user sees. All three sites render their result lists client-side (or, in
+# Soliton's case, omit prices from them), so the human-facing /search page is
+# useless to us. Verify these against the live sites if results ever go empty —
+# that is the first thing to break.
 scraper:
-  # Per-request timeout when fetching a store page (ms)
   timeout-ms: 8000
-  # A realistic browser User-Agent so stores are less likely to block us
+  # Wall-clock ceiling for one store's search + enrichment.
+  store-budget-ms: 12000
   user-agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
-  # How many results to pull from each store's search page
-  max-results-per-store: 8
-  # Global toggle to enable/disable each store without code changes
+  # Candidates pulled per store before relevance filtering.
+  max-results-per-store: 24
+  # Survivors we spend a detail-page fetch on, per store.
+  max-enriched-per-store: 6
+  max-retries: 2
+
   stores:
     kontakt:
       enabled: true
       base-url: "https://kontakt.az"
+      # Magento + Elasticsuite "multisearch" JSON API. The visible /search/ page
+      # contains only loading skeletons server-side.
+      search-url: "https://kontakt.az/kontaktcatalog/multisearch/search/?query={query}&limit=24&offset=0&categories=0&fields=true&filters=true&lang=az"
+      min-request-interval-ms: 500
+      enrich: true
+
     irshad:
       enabled: true
       base-url: "https://irshad.az"
+      # The AJAX endpoint behind /az/mehsullar; returns the product-grid fragment
+      # complete with prices and installment terms.
+      search-url: "https://irshad.az/az/products/list?q={query}"
+      min-request-interval-ms: 800
+      enrich: true
+
     soliton:
       enabled: true
       base-url: "https://soliton.az"
+      # Server-rendered, but title/URL only — prices live on the product page,
+      # so enrichment is mandatory for this store to contribute anything.
+      search-url: "https://soliton.az/search.php?q={query}"
+      min-request-interval-ms: 500
+      enrich: true
+
+# ---- Public API protection ----
+# One uncached search fans out to ~20 upstream requests, so this cap protects the
+# stores as much as it protects us.
+ratelimit:
+  requests-per-minute: 20
+  window-seconds: 60
+
+# ---- Admin analytics ----
+# Unset means the endpoint returns 404. Set a value to enable it, and send it as
+# the X-Admin-Key header.
+admin:
+  api-key: ${ADMIN_API_KEY:}
+
+cors:
+  allowed-origins: ${CORS_ORIGINS:http://localhost:3000,http://localhost:5173}
 
 logging:
   level:

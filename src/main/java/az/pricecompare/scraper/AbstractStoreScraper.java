@@ -1,24 +1,23 @@
 package az.pricecompare.scraper;
 
 import az.pricecompare.config.ScraperProperties;
-import az.pricecompare.domain.ProductSpecs;
 import az.pricecompare.domain.StoreOffer;
-import az.pricecompare.scraper.impl.SelectorSet;
 import lombok.extern.slf4j.Slf4j;
 import org.jsoup.nodes.Element;
-import org.jsoup.select.Elements;
 
-import java.io.UnsupportedEncodingException;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Shared scaffolding for store scrapers: config lookup, enabled flag, and a
- * template {@link #search(String)} that fetches the search page, delegates
- * per-store parsing to subclasses, and guards each product parse so one bad
- * item can't kill the whole store.
+ * Shared scaffolding for store scrapers: config lookup, URL building, and the
+ * error/enabled handling that would otherwise be copy-pasted three times.
+ *
+ * Parsing is deliberately <em>not</em> shared. An earlier version drove all three
+ * stores through one selector-set abstraction, but the stores turned out to have
+ * nothing in common — one returns JSON, one an HTML fragment, one a page with no
+ * prices — so each subclass owns its own parsing and this class stays thin.
  */
 @Slf4j
 public abstract class AbstractStoreScraper implements StoreScraper {
@@ -31,136 +30,113 @@ public abstract class AbstractStoreScraper implements StoreScraper {
         this.props = props;
     }
 
-    /** The config slug used in application.yml (e.g. "kontakt"). */
-    protected abstract String configKey();
+    /** Phase-one implementation, already guarded against exceptions by {@link #search}. */
+    protected abstract List<StoreOffer> doSearch(String query) throws Exception;
 
-    /** Build the store's search URL for a query. */
-    protected abstract String buildSearchUrl(String query);
+    /** Phase-two implementation, already guarded by {@link #enrich}. */
+    protected abstract void doEnrich(StoreOffer offer) throws Exception;
 
-    /**
-     * Parse the fetched search-results document into offers.
-     * Subclasses implement the store-specific selectors here.
-     */
-    protected abstract List<StoreOffer> parseSearchResults(org.jsoup.nodes.Document doc);
+    protected String configKey() {
+        return storeName().getConfigKey();
+    }
+
+    protected ScraperProperties.StoreConfig config() {
+        ScraperProperties.StoreConfig cfg = props.store(configKey());
+        return cfg != null ? cfg : new ScraperProperties.StoreConfig();
+    }
 
     @Override
     public boolean isEnabled() {
-        ScraperProperties.StoreConfig cfg = props.getStores().get(configKey());
+        ScraperProperties.StoreConfig cfg = props.store(configKey());
         return cfg != null && cfg.isEnabled();
     }
 
+    @Override
+    public boolean isEnrichEnabled() {
+        return config().isEnrich();
+    }
+
     protected String baseUrl() {
-        ScraperProperties.StoreConfig cfg = props.getStores().get(configKey());
-        return cfg != null ? cfg.getBaseUrl() : "";
+        String base = config().getBaseUrl();
+        return base == null ? "" : base;
+    }
+
+    protected long pace() {
+        return config().getMinRequestIntervalMs();
     }
 
     protected int maxResults() {
         return props.getMaxResultsPerStore();
     }
 
+    /** Substitute the URL-encoded query into the configured search URL template. */
+    protected String searchUrl(String query) {
+        String template = config().getSearchUrl();
+        if (template == null || template.isBlank()) {
+            throw new IllegalStateException(
+                    "No searchUrl configured for scraper.stores." + configKey());
+        }
+        return template.replace("{query}", encode(query));
+    }
+
     @Override
     public List<StoreOffer> search(String query) {
         if (!isEnabled()) {
-            log.info("{} is disabled, skipping", storeName());
+            log.debug("{} is disabled, skipping", storeName());
             return new ArrayList<>();
         }
-        String url = buildSearchUrl(query);
         try {
-            var doc = fetcher.get(url);
-            List<StoreOffer> offers = parseSearchResults(doc);
-            log.info("{}: found {} offers for '{}'", storeName(), offers.size(), query);
+            List<StoreOffer> offers = doSearch(query);
+            log.info("{}: {} candidates for '{}'", storeName(), offers.size(), query);
             return offers;
         } catch (Exception e) {
             // Surface as a per-store failure; the orchestrator records it and
             // continues with the other stores.
-            log.warn("{}: scrape failed for '{}': {}", storeName(), query, e.toString());
+            log.warn("{}: search failed for '{}': {}", storeName(), query, e.toString());
             throw new StoreScrapeException(storeName(), e.getMessage(), e);
         }
     }
 
-    // ---------------------------------------------------------------------
-    // Reusable generic parsing. Most Azerbaijani electronics stores render a
-    // grid of product cards with the same conceptual fields, so a single
-    // selector-driven parser handles all of them. A store with unusual markup
-    // can still override parseSearchResults() directly.
-    // ---------------------------------------------------------------------
-
-    /**
-     * Parse a results document using a {@link SelectorSet}. Each card is parsed
-     * inside a try/catch so one malformed card is skipped rather than failing
-     * the store.
-     */
-    protected List<StoreOffer> parseWithSelectors(org.jsoup.nodes.Document doc, SelectorSet sel) {
-        List<StoreOffer> offers = new ArrayList<>();
-        Elements cards = doc.select(sel.productCard());
-        int limit = Math.min(cards.size(), maxResults());
-
-        for (int i = 0; i < limit; i++) {
-            Element card = cards.get(i);
-            try {
-                StoreOffer offer = parseCard(card, sel);
-                if (offer != null && offer.getRawTitle() != null && !offer.getRawTitle().isBlank()) {
-                    offers.add(offer);
-                }
-            } catch (Exception e) {
-                log.debug("{}: skipped a card: {}", storeName(), e.toString());
-            }
+    @Override
+    public StoreOffer enrich(StoreOffer offer) {
+        if (offer == null || offer.getProductUrl() == null || !isEnrichEnabled()) {
+            return offer;
         }
-        return offers;
-    }
-
-    private StoreOffer parseCard(Element card, SelectorSet sel) {
-        String title = ScrapeUtils.clean(text(card, sel.title()));
-        String href = attr(card, sel.link(), "href");
-        String price = text(card, sel.price());
-        String oldPrice = text(card, sel.oldPrice());
-
-        List<String> images = new ArrayList<>();
-        for (Element img : card.select(sel.image())) {
-            // Lazy-loaded images frequently live in data-src, not src.
-            String src = firstNonBlank(img.attr("data-src"), img.attr("data-original"), img.attr("src"));
-            if (src != null && !src.isBlank()) {
-                images.add(ScrapeUtils.absoluteUrl(baseUrl(), src));
-            }
+        try {
+            doEnrich(offer);
+            offer.setEnriched(true);
+        } catch (Exception e) {
+            // Best-effort: a listing without specs still beats no listing.
+            log.debug("{}: enrichment failed for {}: {}",
+                    storeName(), offer.getProductUrl(), e.toString());
         }
-
-        return StoreOffer.builder()
-                .store(storeName())
-                .rawTitle(title)
-                .productUrl(ScrapeUtils.absoluteUrl(baseUrl(), href))
-                .price(ScrapeUtils.parsePrice(price))
-                .oldPrice(ScrapeUtils.parsePrice(oldPrice))
-                .currency("AZN")
-                .inStock(true)
-                .imageUrls(images)
-                .specs(ProductSpecs.builder().build())
-                .build();
+        return offer;
     }
 
     // ---- small DOM helpers shared by subclasses ----
 
-    protected String text(Element root, String sel) {
-        Element el = root.selectFirst(sel);
-        return el != null ? el.text() : null;
+    protected static String text(Element root, String selector) {
+        if (root == null) return null;
+        Element el = root.selectFirst(selector);
+        return el != null ? ScrapeUtils.clean(el.text()) : null;
     }
 
-    protected String attr(Element root, String sel, String attr) {
-        Element el = root.selectFirst(sel);
-        return el != null ? el.attr(attr) : null;
+    protected static String attr(Element root, String selector, String attribute) {
+        if (root == null) return null;
+        Element el = root.selectFirst(selector);
+        return el != null ? el.attr(attribute) : null;
     }
 
-    protected static String firstNonBlank(String... values) {
-        for (String v : values) {
-            if (v != null && !v.isBlank()) return v;
-        }
-        return null;
+    /** Lazy-loaded images usually hide the real URL in a data attribute. */
+    protected String imageUrl(Element img) {
+        if (img == null) return null;
+        String src = ScrapeUtils.firstNonBlank(
+                img.attr("data-src"), img.attr("data-original"),
+                img.attr("data-lazy"), img.attr("src"));
+        return ScrapeUtils.absoluteUrl(baseUrl(), src);
     }
 
     protected static String encode(String q) {
-        try {
-            return URLEncoder.encode(q, StandardCharsets.UTF_8.name());
-        } catch (UnsupportedEncodingException e) {
-            return q;
-        }
+        return URLEncoder.encode(q == null ? "" : q, StandardCharsets.UTF_8);
     }
 }

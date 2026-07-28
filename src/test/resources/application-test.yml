@@ -9,15 +9,38 @@ spring:
       ddl-auto: create-drop
     database-platform: org.hibernate.dialect.H2Dialect
 
+# Mirrors the production endpoints so the live smoke test exercises the real
+# thing. Kept in sync with src/main/resources/application.yml by hand.
 scraper:
-  timeout-ms: 3000
+  timeout-ms: 10000
+  store-budget-ms: 25000
+  max-results-per-store: 24
+  max-enriched-per-store: 4
+  max-retries: 2
+  user-agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
   stores:
     kontakt:
       enabled: true
       base-url: "https://kontakt.az"
+      search-url: "https://kontakt.az/kontaktcatalog/multisearch/search/?query={query}&limit=24&offset=0&categories=0&fields=true&filters=true&lang=az"
+      min-request-interval-ms: 500
+      enrich: true
     irshad:
       enabled: true
       base-url: "https://irshad.az"
+      search-url: "https://irshad.az/az/products/list?q={query}"
+      min-request-interval-ms: 800
+      enrich: true
     soliton:
       enabled: true
       base-url: "https://soliton.az"
+      search-url: "https://soliton.az/search.php?q={query}"
+      min-request-interval-ms: 500
+      enrich: true
+
+ratelimit:
+  requests-per-minute: 1000
+
+logging:
+  level:
+    az.pricecompare: INFO

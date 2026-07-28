@@ -1,10 +1,10 @@
 # Price Compare — Search Backend
 
 A Spring Boot monolith that lets a user search one product (e.g. `iphone 16 pro max`)
-and get it compared across several Azerbaijani electronics stores — **Kontakt Home,
-Irshad, Soliton** — in a single request. Prices, colors, images, specs and credit
-plans are scraped from each store, normalized, and fuzzy-matched so the same phone
-lines up across stores for side-by-side comparison.
+and get it compared across three Azerbaijani electronics stores — **Kontakt Home,
+İrşad, Soliton** — in a single request. Prices, colours, images, specs and
+installment plans are scraped from each store, normalized, and matched so the same
+phone lines up across stores for side-by-side comparison.
 
 > The frontend is out of scope — this repo is the backend/API only.
 
@@ -18,56 +18,132 @@ GET /api/search?q=iphone 16 pro max
 
 1. **Cache check** — a normalized query hits a Caffeine cache (30-min TTL). On a
    hit, the stored comparison is returned instantly.
-2. **Parallel scrape** — on a miss, all enabled store scrapers run concurrently.
-   Each store is bounded by its own timeout; one slow/broken store never blocks
-   the others, and failures are reported, not hidden.
-3. **Normalize** — each store's messy title (`Smartfon Apple iPhone 16 Pro Max
-   256Gb Qara`) is parsed into brand / model / storage / RAM.
-4. **Fuzzy match** — offers that refer to the same physical product are grouped
-   using token-set similarity + brand/storage agreement.
-5. **Compare** — each group is returned with computed highlights: cheapest store,
-   price range, potential saving, and the union of all colors seen.
+2. **Parallel search** — on a miss, all enabled store scrapers run concurrently.
+   Each store gets a wall-clock budget; one slow or broken store never blocks the
+   others, and failures are reported in `storeErrors`, not hidden.
+3. **Relevance filter** — the stores' own search engines rank accessories above
+   products, so hits that don't contain every query word, or that look like a case
+   or cable, are dropped before they cost us anything.
+4. **Enrich** — surviving offers get their product pages fetched in parallel for
+   specs, installment plans, extra images, and (for Soliton) the price itself.
+5. **Normalize & match** — messy titles are parsed into brand / model / storage /
+   colour, then grouped so the same product from three stores becomes one row.
+6. **Compare** — each group returns per-store summaries: price, colours stocked,
+   **colours missing relative to the other stores**, and the cheapest monthly
+   installment.
 
-### Example response shape
+### Example response
 
 ```jsonc
 {
-  "query": "iphone 16 pro max",
+  "query": "samsung galaxy s25",
   "fromCache": false,
-  "fetchedAt": "2026-07-13T10:00:00Z",
+  "fetchedAt": "2026-07-28T06:10:00Z",
+  "tookMs": 4391,
   "storesQueried": ["KONTAKT_HOME", "IRSHAD", "SOLITON"],
   "storeErrors": [],
   "results": [
     {
-      "canonicalName": "Apple Iphone 16 Pro Max 256GB",
-      "brand": "apple",
-      "lowestPrice": 2000,
-      "highestPrice": 2200,
-      "cheapestStore": "KONTAKT_HOME",
-      "maxSaving": 200,
-      "allColorsSeen": ["Titanium", "Qara"],
-      "offers": [
+      "canonicalName": "Samsung Galaxy S25 128GB",
+      "brand": "samsung",
+      "model": "galaxy s25",
+      "storage": "128GB",
+      "lowestPrice": 1749.99,
+      "highestPrice": 1799.99,
+      "cheapestStore": "SOLITON",
+      "maxSaving": 50.00,
+      "allColorsSeen": ["Navy", "Silver"],
+      "totalOffers": 3,
+      "stores": [
         {
-          "store": "KONTAKT_HOME",
-          "rawTitle": "Apple iPhone 16 Pro Max 256GB Natural Titanium",
-          "productUrl": "https://kontakt.az/...",
-          "price": 2000,
+          "store": "SOLITON",
+          "storeDisplayName": "Soliton",
+          "price": 1749.99,
+          "maxPrice": 1749.99,
           "oldPrice": null,
-          "currency": "AZN",
+          "productUrl": "https://soliton.az/...",
+          "imageUrl": "https://soliton.az/...",
           "inStock": true,
-          "availableColors": ["Titanium"],
-          "imageUrls": ["https://..."],
+          "colorsAvailable": ["Navy"],
+          "colorsMissing": ["Silver"],
+          "lowestMonthlyPayment": 88.21,
           "creditOptions": [
-            { "months": 12, "monthlyPayment": 175.50, "totalPayable": 2106, "interestFree": false }
+            { "months": 3, "monthlyPayment": 583.33, "totalPayable": 1749.99,
+              "overpayment": 0.00, "interestFree": true }
           ],
-          "specs": { "storage": "256GB", "ram": null, "processor": null }
+          "variantCount": 1,
+          "offers": [ /* one per colour variant, with specs */ ]
         }
-        // ... IRSHAD, SOLITON offers
+        // ... İRŞAD, KONTAKT_HOME
       ]
     }
   ]
 }
 ```
+
+`colorsMissing` is the field that answers "Kontakt has silver but not navy" — it's
+computed per store against the union of colours all stores carry.
+
+---
+
+## How each store is actually integrated
+
+This is the part that breaks. All three sites had to be reverse-engineered, and
+none of them is scraped from the page a human sees.
+
+| Store | Endpoint used | Format | Why not the normal page |
+|---|---|---|---|
+| **Kontakt** | `/kontaktcatalog/multisearch/search/` | **JSON** | `/search/` renders products client-side; server HTML has only loading skeletons |
+| **İrşad** | `/az/products/list?q=` | HTML fragment | `/az/mehsullar?q=` ships an empty `<div id="productGridItems">` filled over AJAX |
+| **Soliton** | `/search.php?q=` | HTML | Server-rendered, but **carries no prices** — every price comes from the product page |
+
+Other quirks handled in code:
+
+- **Soliton's search is a strict AND** over all words. `iphone 16 pro max` returns
+  zero results while `iphone 16` returns three, so `SolitonScraper` drops trailing
+  words until something matches.
+- **Kontakt's stock flag is optimistic.** Its API reports `In Stock` for products
+  whose own page says `OutOfStock`; the page wins.
+- **Kontakt shows `------` for installments on out-of-stock items** — those terms
+  are skipped rather than invented.
+- **Colour is a separate SKU everywhere.** "iPhone 16 128 GB Black" and "... White"
+  are different listings, which is why colour is a variant dimension rather than
+  part of a product's identity.
+- **Part numbers differ per store.** İrşad writes `Galaxy S25 SM-S931`, Soliton
+  just `Galaxy S25`; the normalizer strips `SM-xxxx` codes or the same phone splits
+  into three separate comparisons.
+
+---
+
+## ⚠️ Before you put this in production
+
+**All three stores disallow their search paths in `robots.txt`**, and İrşad
+publishes `Crawl-delay: 30`:
+
+```
+kontakt.az:  Disallow: */search        ← covers the multisearch API
+soliton.az:  Disallow: /search.php
+irshad.az:   Crawl-delay: 30
+```
+
+This backend does not honour those directives — it paces requests per host
+(`min-request-interval-ms`, 500–800ms) and caches aggressively, but 800ms is not
+30 seconds. That is a deliberate, documented choice, not an oversight. Two things
+follow:
+
+1. **Get permission.** An affiliate or data-sharing agreement with these stores
+   turns the whole project from adversarial to supported, and is worth an email
+   before you launch publicly.
+2. **Live scraping doesn't scale.** The long-term architecture is a scheduled
+   crawler that walks each store's sitemap (İrşad and Soliton both publish one)
+   into your own Postgres, with `/api/search` querying your own database. That
+   also gets you price history, sub-50ms responses, and immunity to Cloudflare
+   challenges. The existing `StoreScraper` implementations move over unchanged —
+   they'd just run on a schedule instead of on a request.
+
+Kontakt and Soliton both sit behind Cloudflare and will intermittently return a
+`403 Just a moment...` challenge. `HtmlFetcher` retries with backoff, which clears
+it most of the time; a sustained challenge shows up honestly in `storeErrors`.
 
 ---
 
@@ -76,10 +152,10 @@ GET /api/search?q=iphone 16 pro max
 - **Java 21**, **Spring Boot 3.3**
 - **Spring Web** (REST), **Spring Validation**
 - **Spring Data JPA + PostgreSQL** (search history / analytics)
-- **Caffeine** (in-memory result cache, 30-min TTL)
-- **Jsoup** (HTML scraping)
-- **Lombok** (boilerplate reduction)
-- **JUnit 5 + AssertJ + H2** (tests, no DB needed)
+- **Caffeine** (result cache + rate-limit counters)
+- **Jsoup** (HTML fetching and parsing), **Jackson** (Kontakt's JSON API)
+- **Lombok**
+- **JUnit 5 + AssertJ + Mockito + H2**
 
 ---
 
@@ -88,14 +164,15 @@ GET /api/search?q=iphone 16 pro max
 ```
 src/main/java/az/pricecompare/
 ├── SearchBackendApplication.java     # entry point
-├── config/                           # scraper props, async pool, cache
-├── domain/                           # API DTOs (StoreOffer, ProductComparison, ...)
-├── scraper/                          # scraping abstraction + shared parsing
-│   └── impl/                         # KontaktHome / Irshad / Soliton scrapers
-├── matching/                         # ProductNormalizer + ProductMatcher (fuzzy)
-├── service/                          # ScrapingOrchestrator + SearchService (cache)
+├── config/                           # scraper props, thread pools, cache
+├── domain/                           # API DTOs (StoreOffer, StoreSummary, ...)
+├── scraper/                          # fetching + shared scaffolding
+│   └── impl/                         # KontaktHome / İrşad / Soliton scrapers
+├── matching/                         # normalizer, colour vocabulary,
+│                                     #   relevance filter, matcher
+├── service/                          # ScrapingOrchestrator + SearchService
 ├── persistence/                      # SearchHistory entity + repository
-└── web/                              # controllers, CORS, error handling
+└── web/                              # controllers, CORS, rate limit, errors
 ```
 
 ---
@@ -103,87 +180,76 @@ src/main/java/az/pricecompare/
 ## Running it
 
 ### Prerequisites
-- **JDK 21** (only requirement — Maven is bundled via the wrapper)
+- **JDK 21** (Maven is bundled via the wrapper)
 - **PostgreSQL** running locally (or point env vars at a remote one)
 
-Verify Java:
-```powershell
-java -version    # must be 21+
-```
-If you don't have it: install [Temurin JDK 21](https://adoptium.net/) (Windows).
-
 ### 1. Start PostgreSQL and create the DB
-```sql
-CREATE DATABASE pricecompare;
-```
-Or with Docker:
 ```bash
 docker run --name pricecompare-db -e POSTGRES_DB=pricecompare \
   -e POSTGRES_PASSWORD=postgres -p 5432:5432 -d postgres:16
 ```
 
-### 2. Configure connection (defaults shown; override via env vars)
+### 2. Configure (defaults shown; override via env vars)
 ```
 DB_URL=jdbc:postgresql://localhost:5432/pricecompare
 DB_USER=postgres
 DB_PASSWORD=postgres
+ADMIN_API_KEY=            # unset ⇒ /api/admin/** returns 404
+CORS_ORIGINS=http://localhost:3000,http://localhost:5173
 ```
 
-### 3. Build & run
-```powershell
-.\mvnw.cmd spring-boot:run
-```
-(First run downloads Maven, then dependencies — give it a minute.)
+### 3. Run
 
-App starts on **http://localhost:8080**.
+```bash
+./mvnw spring-boot:run
+```
+
+On Windows use `.\mvnw.cmd spring-boot:run`. App starts on **http://localhost:8080**.
 
 ### 4. Try it
-```
-http://localhost:8080/api/search?q=iphone 16 pro max
-```
 
-### Run tests (no Postgres needed — uses H2)
-```powershell
-.\mvnw.cmd test
+```bash
+curl "http://localhost:8080/api/search?q=samsung%20galaxy%20s25"
 ```
 
 ---
 
-## ⚠️ Important: the scrapers need real selectors
+## Tests
 
-I could not inspect the live sites while writing this, so the CSS selectors in
-each scraper are **educated-guess placeholders**. The architecture, matching,
-caching and API are complete and tested; the selectors are the one part you must
-calibrate against each store's real HTML.
+```bash
+./mvnw test
+```
 
-Each scraper keeps its selectors in one small block:
+No database or network needed — H2 in-memory, and the scrapers are driven against
+recorded fixtures.
 
-- `scraper/impl/KontaktHomeScraper.java` → `SELECTORS`
-- `scraper/impl/IrshadScraper.java` → `SELECTORS`
-- `scraper/impl/SolitonScraper.java` → `SELECTORS`
-- `buildSearchUrl(...)` in each → confirm the real search URL/param
+| Suite | What it protects |
+|---|---|
+| `ScraperFixtureTest` | Every CSS selector and JSON path, against markup captured verbatim from the live sites (`src/test/resources/fixtures`) |
+| `RelevanceFilterTest` | That a ₼2.99 phone case never gets reported as the cheapest iPhone |
+| `ProductNormalizerTest` | Title parsing: colours, storage vs RAM, part numbers |
+| `ProductMatcherTest` | Cross-store grouping and per-store colour rollups |
+| `SearchApiTest` | HTTP contract, validation, rate limiting, admin auth |
 
-### How to fix a scraper
-1. Open the store's search page in a browser, e.g. search "iphone 16".
-2. Right-click a product card → **Inspect**.
-3. Note the class/structure of: the card container, the title link, the price,
-   the old price, the image.
-4. Update the matching strings in that store's `SELECTORS` record.
-5. Update `buildSearchUrl` if the search path/param differs from `/search?q=`.
-6. Re-run and check the logs: each scraper logs how many offers it found.
+### Checking the live stores
 
-### Things to watch when scraping these sites
-- **JS-rendered content**: if a store renders products with JavaScript, Jsoup
-  (which sees only initial HTML) won't find them. You'd then switch that store to
-  a headless browser (e.g. Playwright/Selenium) or call the store's internal JSON
-  API if it has one (check the Network tab). The `StoreScraper` interface makes
-  this a drop-in swap for a single store.
-- **Blocking**: a realistic User-Agent is set. If a store blocks you, add delays,
-  rotate proxies, or reduce frequency. Respect each site's `robots.txt` and terms.
-- **Detail pages**: colors, full spec tables and credit plans usually live on the
-  product page, not the search grid. The current scrapers populate what's on the
-  grid; extend each scraper to fetch `productUrl` and parse those fields. The DTOs
-  (`ProductSpecs`, `CreditOption`, `availableColors`) are already there for it.
+`LiveSearchSmokeTest` boots the app and hits the real sites. It is disabled by
+default and must be asked for:
+
+```bash
+./mvnw test -Dtest=LiveSearchSmokeTest -Dlive.stores=true
+```
+
+Add `-Dlive.query="samsung galaxy s25"` to probe a different product. It prints a
+full comparison table.
+
+**If this fails while `ScraperFixtureTest` passes, a store changed its markup.**
+Re-capture the relevant fixture and fix the selector.
+
+> On a network behind a TLS-intercepting proxy the JDK won't trust the injected
+> certificate even though `curl` does. Add
+> `-DargLine="-Djavax.net.ssl.trustStoreType=KeychainStore -Djavax.net.ssl.trustStore=NONE"`
+> on macOS, or import the proxy CA into the JDK truststore.
 
 ---
 
@@ -191,19 +257,27 @@ Each scraper keeps its selectors in one small block:
 
 | Key | Meaning |
 |-----|---------|
-| `scraper.timeout-ms` | Per-store fetch timeout |
-| `scraper.user-agent` | Browser UA sent to stores |
-| `scraper.max-results-per-store` | Cap on offers parsed per store |
+| `scraper.timeout-ms` | Per-request socket timeout |
+| `scraper.store-budget-ms` | Wall-clock ceiling for one store's search + enrichment |
+| `scraper.max-results-per-store` | Candidates pulled before relevance filtering |
+| `scraper.max-enriched-per-store` | Survivors we spend a detail-page fetch on |
+| `scraper.max-retries` | Retries per request (Cloudflare 403s usually clear) |
 | `scraper.stores.<slug>.enabled` | Toggle a store without code changes |
-| `scraper.stores.<slug>.base-url` | Store base URL |
+| `scraper.stores.<slug>.search-url` | Real search endpoint; `{query}` is substituted |
+| `scraper.stores.<slug>.min-request-interval-ms` | Politeness gap between requests to that host |
+| `scraper.stores.<slug>.enrich` | Whether to fetch product pages for that store |
+| `ratelimit.requests-per-minute` | Per-client cap on `/api/search` |
+| `admin.api-key` | Token for `/api/admin/**`; unset disables the endpoint |
+| `cors.allowed-origins` | Comma-separated frontend origins |
 
 ---
 
 ## Suggested next steps
-- Add detail-page enrichment (colors / specs / credit plans) per store.
-- Add a `POST /api/refresh?q=` to force-bypass the cache.
-- Move DB schema to Flyway migrations (currently `ddl-auto: update` for dev).
-- Add rate limiting + auth on `/api/admin/**`.
-- Add integration tests that feed saved HTML fixtures into each scraper (so you
-  can test parsing without hitting the live sites).
-```
+
+- **Move to a scheduled crawler + own database** (see the warning above). This is
+  the single highest-value change and everything else here survives it.
+- Add `POST /api/refresh?q=` to force-bypass the cache.
+- Move the schema to Flyway migrations (currently `ddl-auto: update`).
+- Track price history so the UI can show "cheapest it's been in 3 months".
+- Add more stores — implement `StoreScraper`, add a `StoreName` constant and a
+  config block. Nothing else needs to change.

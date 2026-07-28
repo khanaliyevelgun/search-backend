@@ -10,9 +10,12 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * A group of {@link StoreOffer}s that all refer to the same physical product
- * (matched across stores by the fuzzy matcher), plus computed comparison hints
- * the frontend can use directly.
+ * One physical product (a model at a given storage size) as sold across stores,
+ * plus the comparison the frontend would otherwise have to compute itself.
+ *
+ * Colour is deliberately <em>not</em> part of the identity: the whole point is to
+ * show that Kontakt has this phone in black and Irshad doesn't, which is only
+ * expressible if both stores' colour variants live in the same comparison.
  */
 @Data
 @Builder
@@ -20,31 +23,36 @@ import java.util.List;
 @AllArgsConstructor
 public class ProductComparison {
 
-    /** Normalized canonical name, e.g. "Apple iPhone 16 Pro Max 256GB". */
+    /** Normalized display name, e.g. "Apple iPhone 16 Pro Max 256GB". */
     private String canonicalName;
 
-    /** The brand, e.g. "Apple", "Samsung". */
     private String brand;
 
-    /** One offer per store for this product. */
+    /** Model without brand or storage, e.g. "iphone 16 pro max". */
+    private String model;
+
+    /** Storage size this comparison is for, e.g. "256GB". Null when unknown. */
+    private String storage;
+
+    /** One entry per store, each rolled up across that store's colour variants. */
     @Builder.Default
-    private List<StoreOffer> offers = new ArrayList<>();
+    private List<StoreSummary> stores = new ArrayList<>();
 
     // ---- Computed comparison highlights ----
 
-    /** Lowest price found across all offers. */
     private BigDecimal lowestPrice;
 
-    /** Highest price found across all offers. */
     private BigDecimal highestPrice;
 
-    /** Which store has the lowest price. */
     private StoreName cheapestStore;
 
-    /** highestPrice - lowestPrice, so the frontend can show potential savings. */
+    /** highestPrice - lowestPrice: what the user saves by picking the right store. */
     private BigDecimal maxSaving;
 
-    /** Union of all colors any store offers for this product. */
+    /** Union of every colour any store carries. */
     @Builder.Default
     private List<String> allColorsSeen = new ArrayList<>();
+
+    /** Total variants across all stores; a rough confidence signal for the match. */
+    private int totalOffers;
 }

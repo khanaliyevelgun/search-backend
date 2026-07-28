@@ -8,9 +8,9 @@ import lombok.NoArgsConstructor;
 import java.math.BigDecimal;
 
 /**
- * A single installment/credit plan offered for a product, e.g.
- * "12 months x 175.50 AZN". Stores in Azerbaijan typically advertise several
- * of these (3, 6, 12, 18, 24 months).
+ * A single installment plan offered for a product, e.g. "12 months x 175.50 AZN".
+ * All three stores advertise several of these (3–24 months) and they are a real
+ * decision factor here — a cheaper cash price can still be the worse deal.
  */
 @Data
 @Builder
@@ -25,11 +25,17 @@ public class CreditOption {
     private BigDecimal monthlyPayment;
 
     /**
-     * Total paid over the full term (monthlyPayment * months). May exceed the
-     * cash price when there's interest; may equal it for interest-free plans.
+     * Total paid over the full term (monthlyPayment * months). Exceeds the cash
+     * price when there's interest; equals it for interest-free plans.
      */
     private BigDecimal totalPayable;
 
-    /** True when the plan is advertised as interest-free ("faizsiz"). */
+    /**
+     * How much more than the cash price the plan costs in total. Zero or negative
+     * means the store is genuinely not charging for the credit.
+     */
+    private BigDecimal overpayment;
+
+    /** True when the total is within rounding distance of the cash price. */
     private boolean interestFree;
 }

@@ -10,9 +10,9 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Top-level payload returned to the frontend for a search.
- * Wraps the list of matched product comparisons plus metadata about the search
- * itself (which stores responded, whether the result came from cache, etc.).
+ * Top-level payload returned to the frontend for a search: the matched product
+ * comparisons plus enough metadata for the UI to be honest about what it's showing
+ * ("Soliton didn't respond" beats silently pretending Soliton has no stock).
  */
 @Data
 @Builder(toBuilder = true)
@@ -23,7 +23,7 @@ public class SearchResponse {
     /** The original query the user typed. */
     private String query;
 
-    /** Product groups, each comparing the same phone across stores. */
+    /** Product groups, each comparing the same product across stores. */
     @Builder.Default
     private List<ProductComparison> results = new ArrayList<>();
 
@@ -40,6 +40,9 @@ public class SearchResponse {
 
     /** When the underlying data was fetched. */
     private Instant fetchedAt;
+
+    /** Wall-clock time the scrape took, in ms. 0 for cached responses. */
+    private long tookMs;
 
     @Data
     @Builder
