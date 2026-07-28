@@ -1,0 +1,48 @@
+spring:
+  application:
+    name: search-backend
+
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/pricecompare}
+    username: ${DB_USER:postgres}
+    password: ${DB_PASSWORD:postgres}
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: update      # dev convenience; use Flyway/Liquibase in prod
+    properties:
+      hibernate:
+        format_sql: false
+        jdbc:
+          time_zone: UTC
+    open-in-view: false
+
+  # The searchResults cache (Caffeine, size + TTL) is defined in CacheConfig.java.
+
+server:
+  port: 8080
+
+# ---- Application-specific scraping config ----
+scraper:
+  # Per-request timeout when fetching a store page (ms)
+  timeout-ms: 8000
+  # A realistic browser User-Agent so stores are less likely to block us
+  user-agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+  # How many results to pull from each store's search page
+  max-results-per-store: 8
+  # Global toggle to enable/disable each store without code changes
+  stores:
+    kontakt:
+      enabled: true
+      base-url: "https://kontakt.az"
+    irshad:
+      enabled: true
+      base-url: "https://irshad.az"
+    soliton:
+      enabled: true
+      base-url: "https://soliton.az"
+
+logging:
+  level:
+    az.pricecompare: INFO
