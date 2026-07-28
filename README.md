@@ -273,6 +273,7 @@ Re-capture the relevant fixture and fix the selector.
 ---
 
 ## Suggested next steps
+<<<<<<< HEAD
 
 - **Move to a scheduled crawler + own database** (see the warning above). This is
   the single highest-value change and everything else here survives it.
@@ -281,3 +282,36 @@ Re-capture the relevant fixture and fix the selector.
 - Track price history so the UI can show "cheapest it's been in 3 months".
 - Add more stores — implement `StoreScraper`, add a `StoreName` constant and a
   config block. Nothing else needs to change.
+=======
+- Add detail-page enrichment (colors / specs / credit plans) per store.
+- Add a `POST /api/refresh?q=` to force-bypass the cache.
+- Move DB schema to Flyway migrations (currently `ddl-auto: update` for dev).
+- Add rate limiting + auth on `/api/admin/**`.
+- Add integration tests that feed saved HTML fixtures into each scraper (so you
+  can test parsing without hitting the live sites).
+```
+
+
+
+Nə etməlidir (3 addım):
+
+JDK 21 yükləsin (Temurin)
+Postgres — bir dəfə bu əmr, vəssalam:
+docker run --name pricecompare-db -e POSTGRES_DB=pricecompare -e POSTGRES_PASSWORD=postgres -p 5432:5432 -d postgres:16
+İşə salsın:
+./mvnw spring-boot:run
+Cədvəlləri backend özü yaradır, SQL yazmağa ehtiyac yoxdur. Maven də layihənin içindədir.
+
+Nə bilməlidir:
+
+Cəmi bir endpoint var: GET localhost:8080/api/search?q=iphone 16
+CORS artıq açıqdır localhost:3000 və 5173 üçün — başqa portda işləyirsə sən mənə de, əlavə edim
+İlk axtarış 4-8 saniyə çəkir (3 sayta gedir) → loading mütləqdir. Sonra 30 dəqiqə keşdən ani gəlir
+Dəqiqədə 20 sorğu limiti var, 429 qaytarır → axtarış inputuna debounce qoysun
+Əsas hissə results[].stores[] — hər mağaza üçün bir sətir, artıq ucuzdan bahaya sıralanıb
+colorsMissing — layihənin əsas fikri. "Kontakt-da qara yoxdur, İrşad-da var" məhz bu sahədən çıxır
+storeErrors boş deyilsə göstərsin — bəzən mağaza cavab vermir, gizlətmək düzgün deyil
+Sənədin içində cavabın tam JSON strukturu sahə-sahə izahla və hazır fetch nümunəsi də var.
+
+
+>>>>>>> b07cade86d60aad303dbcfd5a049845e9fa5d313
